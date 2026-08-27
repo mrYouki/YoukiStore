@@ -1,0 +1,145 @@
+# .github/workflows/submission-check.yml
+# -----------------------------------------------------------------------
+# Triggers whenever someone opens a new Issue asking to add their
+# extension. The issue body must contain a line like:
+#
+#   repo: https://github.com/someuser/some-extension
+#
+# Steps:
+#   1. Extract the target repo URL from the issue body.
+#   2. Run submission-checker.js against it (read-only, public API).
+#   3. If all 5 checks pass: append the entry to index.json, commit +
+#      push, comment success, close issue as "completed".
+#   4. If anything is missing: comment the detailed error log, close
+#      issue as "not_planned".
+#
+# Permissions: uses the auto-generated GITHUB_TOKEN, scoped to this repo
+# only. No personal access token or stored secret is needed.
+# -----------------------------------------------------------------------
+name: Extension Submission Check
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: write
+
+jobs:
+  check-submission:
+    if: contains(github.event.issue.labels.*.name, 'submission') || contains(github.event.issue.title, '[Submit]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Extract target repo URL from issue body
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || "";
+            const match = body.match(/repo:\s*https?:\/\/github\.com\/([^\s\/]+\/[^\s\/]+)/i);
+            if (!match) {
+              core.setFailed("No 'repo: https://github.com/owner/name' line found in issue body.");
+              return;
+            }
+            core.setOutput("target", match[1].replace(/\.git$/, ""));
+
+      - name: Run submission checker
+        id: checker
+        run: |
+          node bot/submission-checker.js "${{ steps.extract.outputs.target }}" > checker_result.json
+          cat checker_result.json
+
+      - name: Update index.json and close issue (success path)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const result = JSON.parse(fs.readFileSync('checker_result.json', 'utf8'));
+
+            if (!result.ok) {
+              const missingList = result.missing.map(m => `- ${m}`).join("\n");
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `**Verification failed** for repo \`${result.repo}\`:\n\n${missingList}\n\nPlease fix the missing requirements and open a new Issue.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: "closed",
+                state_reason: "not_planned",
+              });
+              return;
+            }
+
+            // Append the new entry to index.json — or update it in place
+            // if this repo was already listed (e.g. someone resubmitting
+            // after fixing an earlier rejection, or re-verifying).
+            const indexPath = 'index.json';
+            let indexData = { extensions: [] };
+            if (fs.existsSync(indexPath)) {
+              indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            }
+            if (!Array.isArray(indexData.extensions)) indexData.extensions = [];
+
+            const alreadyListed = indexData.extensions.some(e => e.repo === result.entry.repo);
+            indexData.extensions = indexData.extensions.filter(e => e.repo !== result.entry.repo);
+            indexData.extensions.push(result.entry);
+
+            fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2) + "\n");
+
+            // Commit + push using the git CLI (GITHUB_TOKEN already has
+            // write access via the checkout action's credentials)
+            const { execSync } = require('child_process');
+            execSync(`git config user.name "youkistore-bot"`);
+            execSync(`git config user.email "actions@github.com"`);
+            execSync(`git add index.json`);
+            execSync(`git commit -m "Add extension: ${result.entry.repo}"`);
+            execSync(`git push`);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: alreadyListed
+                ? `**Verified successfully.** Updated \`${result.entry.repo}\` on YoukiStore.`
+                : `**Verified successfully.** Added \`${result.entry.repo}\` to YoukiStore.`,
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: "closed",
+              state_reason: "completed",
+            });
+
+      - name: Comment failure log if checker crashed
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `Could not run the automated check for this request. Make sure the Issue body includes a line like:\n\`repo: https://github.com/owner/name\`\n\nThen open a new Issue.`,
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: "closed",
+              state_reason: "not_planned",
+            });
