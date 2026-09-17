@@ -8,10 +8,13 @@
 # Steps:
 #   1. Extract the target repo URL from the issue body.
 #   2. Run submission-checker.js against it (read-only, public API).
-#   3. If all 5 checks pass: append the entry to index.json, commit +
-#      push, comment success, close issue as "completed".
-#   4. If anything is missing: comment the detailed error log, close
-#      issue as "not_planned".
+#   3. If all 6 checks pass (plugin.json, README.md, media folder, icon
+#      file, OSI open-source license, GitHub Release): append the entry
+#      to index.json, commit + push, comment success, close issue as
+#      "completed".
+#   4. If anything is missing: comment the detailed error log — each
+#      missing item includes a concrete suggestion for fixing it — and
+#      close issue as "not_planned" (i.e. rejected, not a silent close).
 #
 # Permissions: uses the auto-generated GITHUB_TOKEN, scoped to this repo
 # only. No personal access token or stored secret is needed.
@@ -32,12 +35,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Extract target repo URL from issue body
         id: extract
@@ -55,7 +58,7 @@ jobs:
       - name: Run submission checker
         id: checker
         run: |
-          node bot/submission-checker.js "${{ steps.extract.outputs.target }}" > checker_result.json
+          node submission-checker.js "${{ steps.extract.outputs.target }}" > checker_result.json
           cat checker_result.json
 
       - name: Update index.json and close issue (success path)
@@ -72,7 +75,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `**Verification failed** for repo \`${result.repo}\`:\n\n${missingList}\n\nPlease fix the missing requirements and open a new Issue.`,
+                body: `**Verification failed** for repo \`${result.repo}\`.\n\nHere's what's missing, with suggestions on how to fix each one:\n\n${missingList}\n\nOnce you've addressed these, please open a new Issue to re-submit.`,
               });
               await github.rest.issues.update({
                 owner: context.repo.owner,

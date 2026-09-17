@@ -165,14 +165,6 @@
   .icon img{ width:100%; height:100%; object-fit:cover; }
   .card-title{ font-size:14px; font-weight:700; }
   .card-author{ font-size:11.5px; color:var(--text-dim); }
-  .card-desc{
-    font-size:12.5px; color:var(--text-dim);
-    line-height:1.5;
-    display:-webkit-box;
-    -webkit-line-clamp:2;
-    -webkit-box-orient:vertical;
-    overflow:hidden;
-  }
   .card-meta{
     display:flex; justify-content:space-between; align-items:center;
     font-size:12px; color:var(--text-dim);
@@ -287,11 +279,6 @@
   .kv{ display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border); }
   .kv span:first-child{ color:var(--text-dim); }
 
-  .perm-list{ display:flex; flex-direction:column; gap:8px; }
-  .perm-item{ display:flex; align-items:center; gap:8px; font-size:12.5px; color:#2b2b2b; }
-  .perm-dot{ width:6px; height:6px; border-radius:50%; background:var(--black); flex-shrink:0; }
-  .perm-note{ font-size:11px; color:var(--text-dim); margin-top:10px; }
-
   .gh-box{
     display:flex; align-items:center; gap:10px;
     border:1px solid var(--border);
@@ -367,8 +354,6 @@ window.FALLBACK_MARK_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><g fill=
       <div class="filter-chip active" data-filter="all">All</div>
       <div class="filter-chip" data-filter="top">Top Rated</div>
       <div class="filter-chip" data-filter="recent">Recent</div>
-      <div class="filter-chip" data-filter="themes">Themes</div>
-      <div class="filter-chip" data-filter="tools">Tools</div>
     </div>
 
     <div class="grid" id="grid">
@@ -401,6 +386,20 @@ const manifestCache = new Map(); // id -> resolved extension object, kept for th
 function formatStars(n){
   if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,'') + 'k';
   return String(n);
+}
+
+function formatUpdated(iso){
+  if(!iso) return '—';
+  const d = new Date(iso);
+  if(isNaN(d)) return '—';
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if(days <= 0) return 'today';
+  if(days === 1) return '1 day ago';
+  if(days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if(months < 12) return months === 1 ? '1 month ago' : `${months} months ago`;
+  const years = Math.floor(months / 12);
+  return years === 1 ? '1 year ago' : `${years} years ago`;
 }
 
 // Renders an extension's icon as a real image using the iconUrl already
@@ -457,45 +456,31 @@ async function loadIndex(){
   }
 }
 
-// ===== Step 2: resolve ONE extension's full data (name, desc, icon,
-// stars, permissions...) by fetching its manifest.json from the URL
-// already stored in index.json. Cached in memory so scrolling back to
-// an already-seen card costs zero requests. =====
-async function resolveExtension(pointer){
+// ===== Step 2: build ONE extension's display object straight from its
+// index.json pointer entry — no plugin.json fetch, no per-card network
+// request. Every field the UI needs (name, stars, last-updated, icon,
+// readme/release URLs) is already stored in index.json by the submission
+// bot, so this is a synchronous, zero-cost lookup. Kept as an async
+// function (and still cached) so call sites don't need to change. =====
+function resolveExtension(pointer){
   if(manifestCache.has(pointer.id)) return manifestCache.get(pointer.id);
-
-  let manifest;
-  try{
-    if(!pointer.manifestUrl) throw new Error("no manifestUrl in index.json for this entry");
-    const res = await fetch(pointer.manifestUrl, { cache: "force-cache" });
-    if(!res.ok) throw new Error("manifest.json not reachable");
-    manifest = await res.json();
-  } catch(err){
-    // A real listed extension whose manifest.json couldn't be fetched
-    // right now (e.g. jsDelivr cache still syncing, file moved, repo
-    // renamed). This is different from "no extensions submitted yet" —
-    // here we know the entry exists, we just can't read its details.
-    console.warn("manifest fetch failed for", pointer.repo, "— showing placeholder:", err.message);
-    manifest = {
-      name: (pointer.repo || "unknown/unknown").split('/')[1], icon:"●", category:"tools", daysAgo:0,
-      desc:"Details for this extension could not be loaded right now.",
-      version:"—", downloads:"—", updated:"—", ghStars:0,
-      releaseFile:"", permissions:[]
-    };
-  }
 
   const resolved = {
     id: pointer.id,
     repo: pointer.repo,
+    name: pointer.name || (pointer.repo || "unknown/unknown").split('/')[1],
     author: (pointer.repo || "unknown/unknown").split('/')[0],
+    icon: "●",
     iconUrl: pointer.iconUrl || null,
     readmeUrl: pointer.readmeUrl || null,
     mediaUrls: pointer.mediaUrls || [],
     releaseUrl: pointer.releaseUrl || null,
-    ...manifest,
+    releaseTag: pointer.releaseTag || null,
+    ghStars: pointer.ghStars || 0,
+    updatedAt: pointer.updatedAt || null,
   };
   manifestCache.set(pointer.id, resolved);
-  return resolved;
+  return Promise.resolve(resolved);
 }
 
 // ===== Step 3: per-extension fetch, only called when that extension's
@@ -557,7 +542,7 @@ const grid = document.getElementById('grid');
 
 // ===== Lazy card rendering =====
 // Every pointer gets an empty skeleton card immediately. An
-// IntersectionObserver watches the grid; a card's manifest.json is only
+// IntersectionObserver watches the grid; a card's plugin.json is only
 // fetched (and cached forever after) once that specific card actually
 // scrolls into the user's viewport — not for all 300 at page load.
 let cardObserver = null;
@@ -586,10 +571,9 @@ async function fillCard(cardEl){
         <div class="card-author">${e.author}</div>
       </div>
     </div>
-    <div class="card-desc">${e.desc}</div>
     <div class="card-meta">
       <span class="star-badge">${formatStars(e.ghStars)} stars</span>
-      <span>${e.downloads} downloads</span>
+      <span>updated ${formatUpdated(e.updatedAt)}</span>
     </div>
   `;
   cardEl.classList.remove('card-skeleton');
@@ -670,18 +654,13 @@ function applyFilters(){
   if(f === 'top'){
     resolvedList.sort((a,b) => b.ghStars - a.ghStars);
   } else if(f === 'recent'){
-    resolvedList.sort((a,b) => a.daysAgo - b.daysAgo);
-  } else if(f === 'themes'){
-    resolvedList = resolvedList.filter(e => e.category === 'themes');
-  } else if(f === 'tools'){
-    resolvedList = resolvedList.filter(e => e.category === 'tools');
+    resolvedList.sort((a,b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
   }
 
   if(q){
     resolvedList = resolvedList.filter(e =>
       e.name.toLowerCase().includes(q) ||
-      e.author.toLowerCase().includes(q) ||
-      (e.desc || '').toLowerCase().includes(q)
+      e.author.toLowerCase().includes(q)
     );
   }
 
@@ -700,10 +679,10 @@ async function showDetail(id){
       ${iconHtml(e.iconUrl, e.icon, 'detail-icon')}
       <div class="detail-title-block">
         <h2 class="detail-title">${e.name}</h2>
-        <div class="detail-sub">by ${e.author} · v${e.version} · updated ${e.updated}</div>
+        <div class="detail-sub">by ${e.author}${e.releaseTag ? ` · ${e.releaseTag}` : ''} · updated ${formatUpdated(e.updatedAt)}</div>
       </div>
       <div class="detail-actions">
-        <a class="btn btn-primary" href="${e.releaseUrl || `https://github.com/${e.repo}/releases/latest/download/${e.releaseFile}`}">Download Extension</a>
+        <a class="btn btn-primary" href="${e.releaseUrl || `https://github.com/${e.repo}/releases/latest`}">Download Extension</a>
         <a class="btn btn-ghost" href="https://github.com/${e.repo}" target="_blank" rel="noopener">${GH_MARK} View Source Code</a>
       </div>
     </div>
@@ -720,13 +699,6 @@ async function showDetail(id){
       </div>
       <div class="detail-side">
         <div class="side-block">
-          <h4>App Permissions</h4>
-          <div class="perm-list">
-            ${e.permissions.map(p => `<div class="perm-item"><span class="perm-dot"></span>${p}</div>`).join('')}
-          </div>
-          <div class="perm-note">Sourced directly from the extension's manifest.json</div>
-        </div>
-        <div class="side-block">
           <h4>Source Repository</h4>
           <div class="gh-box">
             <span class="gh-icon">${GH_MARK}</span>
@@ -739,9 +711,7 @@ async function showDetail(id){
         </div>
         <div class="side-block">
           <h4>Info</h4>
-          <div class="kv"><span>Version</span><span>${e.version}</span></div>
-          <div class="kv"><span>Downloads</span><span>${e.downloads}</span></div>
-          <div class="kv"><span>Last updated</span><span>${e.updated}</span></div>
+          <div class="kv"><span>Last updated</span><span>${formatUpdated(e.updatedAt)}</span></div>
           <div class="kv"><span>Repository</span><span>${e.repo}</span></div>
         </div>
       </div>
